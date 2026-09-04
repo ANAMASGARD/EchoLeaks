@@ -26,7 +26,7 @@ Always follow **Neobrutalism** (neobrutalism.com / `@neobrutalism` registry):
 - Use existing theme tokens in `app/globals.css` and components from `components/ui/`
 - Add UI via: `npx shadcn@latest add @neobrutalism/<name>`
 
-**Rounded corners:** All buttons, inputs, cards, and interactive controls use **rounded corners** (prefer `rounded-full` for buttons, `rounded-lg` / `rounded-xl` for panels). Do not use sharp square corners on UI chrome even though base `--radius` may be `0`.
+**Rounded corners (mandatory):** Every button, navbar control, input, card, and interactive element must have clearly visible rounded corners. Prefer `rounded-full` for buttons and navigation items, and `rounded-lg` / `rounded-xl` for panels. Never ship sharp square UI chrome or reset the root `--radius` to `0`.
 
 ## Landing UX (current)
 
