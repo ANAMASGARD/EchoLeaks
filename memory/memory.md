@@ -18,6 +18,7 @@ Next.js 16 (App Router) · React 19 · Tailwind v4 · shadcn + Neobrutalism · C
 - **Backend:** Drizzle schema/migration, authenticated Route Handlers, private R2 presigning/HEAD verification, Brevo idempotency, revocation/events, no-store responses, and focused crypto/policy/email tests.
 - **Database config:** `drizzle.config.ts` loads `.env.local` via `@next/env`; use `db:generate`, `db:check`, `db:migrate`, `db:verify`, and `db:studio`. `DATABASE_URL` stays server-only.
 - **Deployment:** Vercel project `anamasgards-projects/echoleaks` has the required Clerk, Neon, R2, Brevo, and app variables in Production and Preview. Remote `APP_URL=https://echoleaks.vercel.app`; local `.env.local` keeps `http://localhost:3000` for local share links.
+- **Vercel build:** The project targets Node 24; `@types/node` is pinned to `^24` so Vitest 5 dependency installation succeeds on Vercel.
 - **Hero CTA:** Protect a File → `/dashboard` (redirects to sign-in if logged out).
 - **Assets:** Favicon/logo `public/io.github.lo2dev.Echo.svg`
 
