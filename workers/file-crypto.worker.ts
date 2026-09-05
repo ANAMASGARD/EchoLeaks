@@ -10,7 +10,7 @@ import {
   unwrapDocumentKey,
   wrapDocumentKey,
 } from "@/lib/crypto/core";
-import type { FileMetadata, PreparedRecipient, ShareAccessResponse } from "@/lib/crypto/types";
+import type { DocumentDownloadAccess, EncryptedDocumentDescriptor, FileMetadata, PreparedRecipient } from "@/lib/crypto/types";
 
 type EncryptRequest = {
   id: string;
@@ -25,17 +25,24 @@ type RewrapRequest = {
   id: string;
   operation: "REWRAP";
   privateKey: CryptoKey;
-  ownerWrappedKey: string;
+  documents: Array<{ documentId: string; ownerWrappedKey: string }>;
   recipients: PreparedRecipient[];
+};
+type DecryptMetadataRequest = {
+  id: string;
+  operation: "DECRYPT_METADATA";
+  privateKey: CryptoKey;
+  documents: EncryptedDocumentDescriptor[];
 };
 type DecryptRequest = {
   id: string;
   operation: "DECRYPT_DOWNLOAD";
   privateKey: CryptoKey;
-  access: ShareAccessResponse;
+  metadata: FileMetadata;
+  access: DocumentDownloadAccess;
 };
 
-self.onmessage = async (event: MessageEvent<EncryptRequest | RewrapRequest | DecryptRequest>) => {
+self.onmessage = async (event: MessageEvent<EncryptRequest | RewrapRequest | DecryptMetadataRequest | DecryptRequest>) => {
   const request = event.data;
   try {
     if (request.operation === "ENCRYPT_UPLOAD") {
@@ -78,24 +85,49 @@ self.onmessage = async (event: MessageEvent<EncryptRequest | RewrapRequest | Dec
     }
 
     if (request.operation === "REWRAP") {
-      const documentKey = await unwrapDocumentKey(base64urlToBytes(request.ownerWrappedKey), request.privateKey, true);
       const ready = request.recipients.filter((recipient) => recipient.status === "READY");
-      const envelopes = await Promise.all(ready.map(async (recipient) => {
+      const envelopes = [];
+      for (const [index, recipient] of ready.entries()) {
         if (!recipient.publicKeyJwk || !recipient.clerkUserId || !recipient.keyVersion || !recipient.publicKeyFingerprint) {
           throw new Error("Recipient key data is incomplete");
         }
         const publicKey = await importPublicKey(recipient.publicKeyJwk);
-        const wrapped = await wrapDocumentKey(documentKey, publicKey);
-        return {
+        const wrappedDocuments = [];
+        for (const document of request.documents) {
+          const documentKey = await unwrapDocumentKey(base64urlToBytes(document.ownerWrappedKey), request.privateKey, true);
+          const wrapped = await wrapDocumentKey(documentKey, publicKey);
+          wrappedDocuments.push({ documentId: document.documentId, wrappedFileKey: bytesToBase64url(new Uint8Array(wrapped)) });
+        }
+        envelopes.push({
           status: "READY" as const,
           email: recipient.email,
           clerkUserId: recipient.clerkUserId,
           keyVersion: recipient.keyVersion,
           publicKeyFingerprint: recipient.publicKeyFingerprint,
-          wrappedFileKey: bytesToBase64url(new Uint8Array(wrapped)),
-        };
-      }));
+          envelopes: wrappedDocuments,
+        });
+        self.postMessage({ id: request.id, progress: String(index + 1) });
+      }
       self.postMessage({ id: request.id, ok: true, result: envelopes });
+      return;
+    }
+
+    if (request.operation === "DECRYPT_METADATA") {
+      const results = [];
+      for (const document of request.documents) {
+        if (document.status === "DELETED" || !document.wrappedFileKey || !document.encryptedMetadata || !document.metadataIv) {
+          results.push({ documentId: document.documentId, status: "DELETED" as const, metadata: null });
+          continue;
+        }
+        const key = await unwrapDocumentKey(base64urlToBytes(document.wrappedFileKey), request.privateKey);
+        const bytes = new Uint8Array(await decryptAes(
+          base64urlToBytes(document.encryptedMetadata), key, base64urlToBytes(document.metadataIv), metadataAad(document.documentId),
+        ));
+        const metadata = JSON.parse(new TextDecoder().decode(bytes)) as FileMetadata;
+        bytes.fill(0);
+        results.push({ documentId: document.documentId, status: "READY" as const, metadata });
+      }
+      self.postMessage({ id: request.id, ok: true, result: results });
       return;
     }
 
@@ -103,21 +135,13 @@ self.onmessage = async (event: MessageEvent<EncryptRequest | RewrapRequest | Dec
     if (!response.ok) throw new Error(`Encrypted download failed (${response.status})`);
     const ciphertext = await response.arrayBuffer();
     const key = await unwrapDocumentKey(base64urlToBytes(request.access.wrappedFileKey), request.privateKey);
-    const metadataBytes = new Uint8Array(await decryptAes(
-      base64urlToBytes(request.access.encryptedMetadata),
-      key,
-      base64urlToBytes(request.access.metadataIv),
-      metadataAad(request.access.documentId),
-    ));
-    const metadata = JSON.parse(new TextDecoder().decode(metadataBytes)) as FileMetadata;
-    metadataBytes.fill(0);
     const file = await decryptAes(
       ciphertext,
       key,
       base64urlToBytes(request.access.fileIv),
       fileAad(request.access.documentId),
     );
-    self.postMessage({ id: request.id, ok: true, result: { metadata, file } }, [file]);
+    self.postMessage({ id: request.id, ok: true, result: { metadata: request.metadata, file } }, [file]);
   } catch (error) {
     self.postMessage({
       id: request.id,

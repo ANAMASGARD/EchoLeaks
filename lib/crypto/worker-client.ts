@@ -2,7 +2,8 @@ import type {
   KeyBundleResponse,
   KeySetupResult,
   PreparedRecipient,
-  ShareAccessResponse,
+  DocumentDownloadAccess,
+  EncryptedDocumentDescriptor,
   UploadResult,
 } from "./types";
 
@@ -67,23 +68,30 @@ export function encryptAndUpload(payload: {
 
 export function rewrapForRecipients(payload: {
   privateKey: CryptoKey;
-  ownerWrappedKey: string;
+  documents: Array<{ documentId: string; ownerWrappedKey: string }>;
   recipients: PreparedRecipient[];
-}) {
+}, onProgress?: (completedRecipients: number) => void) {
   return runWorker<Array<{
     status: "READY";
     email: string;
     clerkUserId: string;
     keyVersion: number;
     publicKeyFingerprint: string;
-    wrappedFileKey: string;
-  }>>(fileWorker(), { operation: "REWRAP", ...payload });
+    envelopes: Array<{ documentId: string; wrappedFileKey: string }>;
+  }>>(fileWorker(), { operation: "REWRAP", ...payload }, (progress) => onProgress?.(Number(progress)));
 }
 
-export function decryptDownload(privateKey: CryptoKey, access: ShareAccessResponse) {
+export function decryptMetadata(privateKey: CryptoKey, documents: EncryptedDocumentDescriptor[]) {
+  return runWorker<Array<{ documentId: string; status: "READY" | "DELETED"; metadata: FileMetadata | null }>>(
+    fileWorker(), { operation: "DECRYPT_METADATA", privateKey, documents },
+  );
+}
+
+export function decryptDownload(privateKey: CryptoKey, metadata: FileMetadata, access: DocumentDownloadAccess) {
   return runWorker<{ metadata: FileMetadata; file: ArrayBuffer }>(fileWorker(), {
     operation: "DECRYPT_DOWNLOAD",
     privateKey,
+    metadata,
     access,
   });
 }

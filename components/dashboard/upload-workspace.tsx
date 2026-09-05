@@ -1,146 +1,160 @@
 "use client";
 
 import { useUser } from "@clerk/nextjs";
-import { Archive, CheckCircle2, FileText, ImageIcon, LoaderCircle, LockKeyhole, ShieldCheck, UploadCloud, X } from "lucide-react";
-import { useReducer, useRef, useState } from "react";
+import { ArrowDown, ArrowUp, FileText, LoaderCircle, LockKeyhole, Plus, RotateCcw, ShieldCheck, Trash2, UploadCloud, X } from "lucide-react";
+import { useRef, useState } from "react";
 import { KeyVaultDialog } from "@/components/crypto/key-vault-dialog";
 import { SharePanel } from "@/components/dashboard/share-panel";
 import { useKeyVault } from "@/hooks/use-key-vault";
-import { MAX_FILE_BYTES } from "@/lib/crypto/constants";
+import { MAX_FILE_BYTES, MAX_GROUP_BYTES, MAX_GROUP_FILES } from "@/lib/crypto/constants";
 import { encryptAndUpload } from "@/lib/crypto/worker-client";
-import { cn } from "@/lib/utils";
 
-type Phase = "IDLE" | "SELECTED" | "INITIALIZING" | "ENCRYPTING" | "UPLOADING" | "FINALIZING" | "READY" | "ERROR" | "CANCELLED";
-type State = { phase: Phase; file: File | null; documentId: string | null; message: string };
-type Action = { type: "SELECT"; file: File } | { type: "PHASE"; phase: Phase; message: string } | { type: "READY"; documentId: string } | { type: "RESET" };
+type ItemPhase = "STAGED" | "PREPARING" | "ENCRYPTING" | "UPLOADING" | "READY" | "FAILED" | "DELETED";
+type QueueItem = { id: string; file: File; phase: ItemPhase; documentId: string | null; message: string };
+type GroupConfig = { groupId: string; ownerPublicKeyJwk: JsonWebKey; ownerKeyVersion: number; cryptoVersion: number };
 
-const initialState: State = { phase: "IDLE", file: null, documentId: null, message: "Nothing is uploaded or stored yet." };
-
-function reducer(state: State, action: Action): State {
-  if (action.type === "SELECT") return { phase: "SELECTED", file: action.file, documentId: null, message: "Ready for local encryption." };
-  if (action.type === "PHASE") return { ...state, phase: action.phase, message: action.message };
-  if (action.type === "READY") return { ...state, phase: "READY", documentId: action.documentId, message: "Protected. R2 contains ciphertext only." };
-  return initialState;
-}
-
-const fileKinds = [{ label: "Documents", icon: FileText }, { label: "Images", icon: ImageIcon }, { label: "ZIP + more", icon: Archive }];
-const activePhases: Phase[] = ["INITIALIZING", "ENCRYPTING", "UPLOADING", "FINALIZING"];
+const activePhases: ItemPhase[] = ["PREPARING", "ENCRYPTING", "UPLOADING"];
 
 function formatFileSize(bytes: number) {
-  const units = ["B", "KB", "MB", "GB"];
-  if (!bytes) return "0 B";
-  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  const value = bytes / 1024 ** index;
-  return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
-}
-
-function SelectedFileIcon({ file }: { file: File }) {
-  if (file.type.startsWith("image/")) return <ImageIcon aria-hidden="true" className="size-5" />;
-  if (/\.(zip|rar|7z|tar|gz)$/i.test(file.name)) return <Archive aria-hidden="true" className="size-5" />;
-  return <FileText aria-hidden="true" className="size-5" />;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
 }
 
 export function UploadWorkspace() {
   const inputRef = useRef<HTMLInputElement>(null);
-  const abortRef = useRef<AbortController | null>(null);
   const { user } = useUser();
   const vault = useKeyVault(user?.id);
-  const [state, dispatch] = useReducer(reducer, initialState);
-  const [isDragging, setIsDragging] = useState(false);
+  const [items, setItems] = useState<QueueItem[]>([]);
+  const [config, setConfig] = useState<GroupConfig | null>(null);
+  const [groupReady, setGroupReady] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("Add files, review the group, then protect them together.");
   const [vaultOpen, setVaultOpen] = useState(false);
-  const active = activePhases.includes(state.phase);
 
-  const selectFile = (file: File | undefined) => {
-    if (!file || active) return;
-    if (file.size > MAX_FILE_BYTES) {
-      dispatch({ type: "PHASE", phase: "ERROR", message: "Choose a file no larger than 25 MiB for this prototype." });
-      return;
+  const updateItem = (id: string, patch: Partial<QueueItem>) => setItems((current) => current.map((item) => item.id === id ? { ...item, ...patch } : item));
+  const readyCount = items.filter((item) => item.phase === "READY").length;
+  const failedCount = items.filter((item) => item.phase === "FAILED").length;
+
+  const addFiles = (files: File[]) => {
+    if (busy || config) return;
+    const next = [...items];
+    for (const file of files) {
+      if (next.length >= MAX_GROUP_FILES) { setMessage("A group can contain at most 10 files."); break; }
+      if (file.size > MAX_FILE_BYTES) { setMessage(`${file.name} is larger than 25 MiB.`); continue; }
+      if (next.reduce((sum, item) => sum + item.file.size, 0) + file.size > MAX_GROUP_BYTES) { setMessage("A group can contain at most 100 MiB."); break; }
+      next.push({ id: crypto.randomUUID(), file, phase: "STAGED", documentId: null, message: "Ready" });
     }
-    dispatch({ type: "SELECT", file });
+    setItems(next);
+  };
+
+  const processItem = async (item: QueueItem, documentId: string, group: GroupConfig, retry = false) => {
+    if (retry) {
+      const retryResponse = await fetch(`/api/documents/${documentId}/retry`, { method: "POST" });
+      const retryState = await retryResponse.json();
+      if (!retryResponse.ok) throw new Error(retryState.error?.message ?? "Could not retry this file.");
+      if (retryState.alreadyReady) { updateItem(item.id, { documentId, phase: "READY", message: "Protected" }); return; }
+    }
+    updateItem(item.id, { documentId, phase: "PREPARING", message: "Preparing" });
+    const urlResponse = await fetch(`/api/documents/${documentId}/upload-url`, { method: "POST" });
+    const url = await urlResponse.json();
+    if (!urlResponse.ok) throw new Error(url.error?.message ?? "Could not prepare encrypted storage.");
+    updateItem(item.id, { phase: "ENCRYPTING", message: "Encrypting locally" });
+    const encrypted = await encryptAndUpload({
+      file: item.file, documentId, uploadUrl: url.uploadUrl,
+      ownerPublicKeyJwk: group.ownerPublicKeyJwk, ownerKeyVersion: group.ownerKeyVersion,
+    }, (phase) => { if (phase === "UPLOADING") updateItem(item.id, { phase: "UPLOADING", message: "Uploading ciphertext" }); });
+    const completeResponse = await fetch(`/api/documents/${documentId}/complete`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...encrypted, cryptoVersion: group.cryptoVersion }) });
+    const completed = await completeResponse.json();
+    if (!completeResponse.ok) throw new Error(completed.error?.message ?? "Could not finalize this file.");
+    updateItem(item.id, { phase: "READY", message: "Protected" });
   };
 
   const protect = async () => {
-    if (!state.file) return;
-    if (!window.isSecureContext) {
-      dispatch({ type: "PHASE", phase: "ERROR", message: "Browser encryption requires HTTPS or localhost." });
-      return;
-    }
-    if (vault.state.status !== "READY") {
-      if (vault.state.status === "CHECKING") dispatch({ type: "PHASE", phase: "ERROR", message: "Your encryption key is still loading. Try again shortly." });
-      else setVaultOpen(true);
-      return;
-    }
-    let initializedDocumentId: string | null = null;
-    const controller = new AbortController();
-    abortRef.current = controller;
+    if (!items.length || busy) return;
+    if (!window.isSecureContext) return setMessage("Browser encryption requires HTTPS or localhost.");
+    if (vault.state.status !== "READY") { setVaultOpen(true); return; }
+    setBusy(true); setMessage("Creating private upload slots…");
     try {
-      dispatch({ type: "PHASE", phase: "INITIALIZING", message: "Preparing a private encrypted upload…" });
-      const initResponse = await fetch("/api/documents/init", { method: "POST", signal: controller.signal });
-      const initialized = await initResponse.json();
-      if (!initResponse.ok) throw new Error(initialized.error?.message ?? "Could not initialize the upload.");
-      initializedDocumentId = initialized.documentId;
-      dispatch({ type: "PHASE", phase: "ENCRYPTING", message: "Encrypting locally in a background worker…" });
-      const encrypted = await encryptAndUpload({
-        file: state.file,
-        documentId: initialized.documentId,
-        uploadUrl: initialized.uploadUrl,
-        ownerPublicKeyJwk: initialized.ownerPublicKeyJwk,
-        ownerKeyVersion: initialized.ownerKeyVersion,
-      }, (phase) => {
-        if (phase === "UPLOADING") dispatch({ type: "PHASE", phase: "UPLOADING", message: "Uploading encrypted bytes directly to private R2…" });
-      }, controller.signal);
-      dispatch({ type: "PHASE", phase: "FINALIZING", message: "Verifying and finalizing the protected file…" });
-      const completeResponse = await fetch(`/api/documents/${initialized.documentId}/complete`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...encrypted, cryptoVersion: initialized.cryptoVersion }),
-        signal: controller.signal,
-      });
-      const completed = await completeResponse.json();
-      if (!completeResponse.ok) throw new Error(completed.error?.message ?? "Could not finalize the upload.");
-      dispatch({ type: "READY", documentId: initialized.documentId });
-    } catch (error) {
-      if (initializedDocumentId) void fetch(`/api/documents/${initializedDocumentId}/fail`, { method: "POST" });
-      if (controller.signal.aborted) {
-        dispatch({ type: "PHASE", phase: "CANCELLED", message: "Protection cancelled. Nothing was finalized." });
-      } else {
-        dispatch({ type: "PHASE", phase: "ERROR", message: error instanceof Error ? error.message : "Protection failed." });
+      const response = await fetch("/api/upload-groups", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fileCount: items.length }) });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error?.message ?? "Could not create the upload group.");
+      const group: GroupConfig = { groupId: body.groupId, ownerPublicKeyJwk: body.ownerPublicKeyJwk, ownerKeyVersion: body.ownerKeyVersion, cryptoVersion: body.cryptoVersion };
+      setConfig(group);
+      let failures = 0;
+      for (const [index, item] of items.entries()) {
+        const documentId = body.documents[index].documentId as string;
+        try { await processItem(item, documentId, group); }
+        catch (error) {
+          failures += 1;
+          updateItem(item.id, { documentId, phase: "FAILED", message: error instanceof Error ? error.message : "Protection failed" });
+          await fetch(`/api/documents/${documentId}/fail`, { method: "POST" }).catch(() => undefined);
+        }
       }
-    } finally {
-      abortRef.current = null;
-    }
+      if (failures) setMessage(`${items.length - failures} / ${items.length} protected. Retry or remove failed files.`);
+      else { setGroupReady(true); setMessage(`${items.length} / ${items.length} protected. Only ciphertext was uploaded.`); }
+    } catch (error) { setMessage(error instanceof Error ? error.message : "Protection failed."); }
+    finally { setBusy(false); }
   };
 
+  const retry = async (item: QueueItem) => {
+    if (!config || !item.documentId || busy) return;
+    setBusy(true);
+    try {
+      await processItem(item, item.documentId, config, true);
+      const remainingFailures = items.filter((candidate) => candidate.id !== item.id && candidate.phase === "FAILED").length;
+      if (!remainingFailures) { setGroupReady(true); setMessage("All files are protected."); }
+    } catch (error) {
+      updateItem(item.id, { phase: "FAILED", message: error instanceof Error ? error.message : "Retry failed" });
+      await fetch(`/api/documents/${item.documentId}/fail`, { method: "POST" }).catch(() => undefined);
+    } finally { setBusy(false); }
+  };
+
+  const continueWithoutFailed = async () => {
+    if (!config || !readyCount || busy) return;
+    setBusy(true);
+    try {
+      const response = await fetch(`/api/upload-groups/${config.groupId}/continue`, { method: "POST" });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error?.message ?? "Could not finalize the successful files.");
+      setItems((current) => current.map((item) => item.phase === "FAILED" ? { ...item, phase: "DELETED", message: "Removed" } : item));
+      setGroupReady(true); setMessage(`${body.fileCount} files protected. Failed files were removed.`);
+    } catch (error) { setMessage(error instanceof Error ? error.message : "Could not continue."); }
+    finally { setBusy(false); }
+  };
+
+  const deleteDocument = async (item: QueueItem) => {
+    if (!item.documentId || !confirm(`Remove ${item.file.name} from this protected group?`)) return;
+    const response = await fetch(`/api/documents/${item.documentId}`, { method: "DELETE" });
+    if (response.ok) { updateItem(item.id, { phase: "DELETED", message: "Removed by owner" }); if (readyCount === 1) setGroupReady(false); }
+    else setMessage("The encrypted file could not be deleted. Try again.");
+  };
+
+  const deleteGroup = async () => {
+    if (!config || !confirm("Delete every encrypted file and revoke every link in this group?")) return;
+    const response = await fetch(`/api/upload-groups/${config.groupId}`, { method: "DELETE" });
+    if (response.ok) { setItems((current) => current.map((item) => ({ ...item, phase: "DELETED", message: "Removed by owner" }))); setGroupReady(false); setMessage("Encrypted files and cryptographic access material were removed. Minimal audit metadata may remain."); }
+    else setMessage("Deletion is incomplete and access remains blocked. Try again.");
+  };
+
+  const move = (index: number, direction: -1 | 1) => setItems((current) => { const next = [...current]; const target = index + direction; if (target < 0 || target >= next.length) return current; [next[index], next[target]] = [next[target], next[index]]; return next; });
+
   return (
-    <section className="min-h-[calc(100svh-4rem)] px-5 py-5 sm:px-7 sm:py-6 md:min-h-svh lg:px-10 lg:py-7">
+    <section className="min-h-svh px-5 py-5 sm:px-7 lg:px-10">
       <div className="mx-auto w-full max-w-6xl">
-        <header><p className="text-xs font-bold tracking-[0.2em] text-muted-foreground uppercase">Protect a file</p><h1 className="mt-1.5 font-head text-4xl leading-none tracking-[-0.05em] sm:text-5xl">Upload</h1></header>
-        <div className="mt-4 rounded-2xl border-2 border-black bg-primary p-4 shadow-md sm:px-5">
-          <div className="flex items-center gap-3"><span className="flex size-10 shrink-0 items-center justify-center rounded-full border-2 border-black bg-card shadow-sm"><ShieldCheck className="size-5" aria-hidden="true" /></span><div><h2 className="font-head text-lg sm:text-xl">Protect any file</h2><p className="mt-1 text-xs sm:text-sm">Encrypted locally. Only ciphertext leaves your browser.</p></div></div>
+        <header><p className="text-xs font-bold tracking-[0.2em] text-muted-foreground uppercase">Protect files</p><h1 className="mt-1 font-head text-4xl sm:text-5xl">Upload</h1></header>
+        <div className="mt-4 rounded-2xl border-2 border-black bg-primary p-4 shadow-md"><div className="flex items-center gap-3"><span className="flex size-10 items-center justify-center rounded-full border-2 border-black bg-card"><ShieldCheck className="size-5" /></span><div><h2 className="font-head text-xl">Protect a file group</h2><p className="text-sm">Every file is encrypted locally with its own key.</p></div></div></div>
+        <h2 className="mt-6 font-head text-2xl">1. Add and review files</h2>
+        <div className="mt-3 rounded-2xl border-[3px] border-dashed border-black bg-card p-4">
+          <input ref={inputRef} type="file" multiple className="sr-only" disabled={busy || !!config} onChange={(event) => { addFiles(Array.from(event.currentTarget.files ?? [])); event.currentTarget.value = ""; }} />
+          {!items.length ? <button type="button" onClick={() => inputRef.current?.click()} className="flex min-h-36 w-full flex-col items-center justify-center rounded-2xl"><UploadCloud className="size-10" /><span className="mt-2 font-head text-xl">Choose up to 10 files</span><span className="text-sm text-muted-foreground">25 MiB each · 100 MiB total</span></button> : <div className="space-y-2">{items.map((item, index) => <div key={item.id} className="flex items-center gap-2 rounded-xl border-2 border-black bg-background p-3"><FileText className="size-5 shrink-0" /><div className="min-w-0 flex-1"><p className="truncate font-bold">{item.file.name}</p><p className="text-xs text-muted-foreground">{formatFileSize(item.file.size)} · {item.message}</p></div>{!config && <><button type="button" aria-label="Move up" onClick={() => move(index, -1)} className="rounded-full border-2 border-black p-2"><ArrowUp className="size-4" /></button><button type="button" aria-label="Move down" onClick={() => move(index, 1)} className="rounded-full border-2 border-black p-2"><ArrowDown className="size-4" /></button><button type="button" aria-label={`Remove ${item.file.name}`} onClick={() => setItems((current) => current.filter((candidate) => candidate.id !== item.id))} className="rounded-full border-2 border-black p-2"><X className="size-4" /></button></>}{item.phase === "FAILED" && <button type="button" disabled={busy} onClick={() => void retry(item)} className="flex items-center gap-1 rounded-full border-2 border-black bg-primary px-3 py-2 font-bold"><RotateCcw className="size-4" /> Retry</button>}{groupReady && item.phase === "READY" && <button type="button" onClick={() => void deleteDocument(item)} className="rounded-full border-2 border-black bg-destructive p-2" aria-label={`Delete ${item.file.name}`}><Trash2 className="size-4" /></button>}{activePhases.includes(item.phase) && <LoaderCircle className="size-5 animate-spin" />}</div>)}</div>}
+          {!config && items.length > 0 && <div className="mt-3 flex flex-wrap items-center justify-between gap-2"><button type="button" onClick={() => inputRef.current?.click()} className="flex items-center gap-2 rounded-full border-2 border-black bg-background px-4 py-2 font-bold"><Plus className="size-4" /> Add another file</button><span className="text-xs font-bold text-muted-foreground">{formatFileSize(items.reduce((sum, item) => sum + item.file.size, 0))} / 100 MiB</span></div>}
         </div>
-        <h2 className="mt-6 font-head text-xl sm:text-2xl">1. Choose a file</h2>
-        <div
-          onDragEnter={(event) => { event.preventDefault(); setIsDragging(true); }}
-          onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; setIsDragging(true); }}
-          onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setIsDragging(false); }}
-          onDrop={(event) => { event.preventDefault(); setIsDragging(false); selectFile(event.dataTransfer.files[0]); }}
-          className={cn("mt-3 rounded-2xl border-[3px] border-dashed border-black bg-card p-4 transition-colors sm:p-5", isDragging && "bg-accent")}
-        >
-          <input ref={inputRef} type="file" className="sr-only" aria-label="Choose any file to protect" disabled={active} onChange={(event) => selectFile(event.currentTarget.files?.[0])} />
-          {state.file ? (
-            <div className="flex min-h-32 flex-col items-center justify-center"><div className="flex w-full items-center gap-3 rounded-2xl border-2 border-black bg-background p-3 shadow-sm"><span className="flex size-10 shrink-0 items-center justify-center rounded-xl border-2 border-black bg-primary"><SelectedFileIcon file={state.file} /></span><div className="min-w-0 flex-1"><p className="truncate font-head text-sm sm:text-base">{state.file.name}</p><p className="text-xs text-muted-foreground">{state.file.type || "File"} · {formatFileSize(state.file.size)}</p></div>{!active && state.phase !== "READY" && <button type="button" onClick={() => dispatch({ type: "RESET" })} aria-label={`Remove ${state.file.name}`} className="flex size-10 items-center justify-center rounded-full border-2 border-black bg-card shadow-sm"><X className="size-5" /></button>}</div></div>
-          ) : (
-            <div className="flex flex-col items-center text-center"><span className="flex size-12 items-center justify-center rounded-full border-2 border-black bg-primary shadow-sm"><UploadCloud className="size-6" /></span><h3 className="mt-3 font-head text-xl">Drop any file here</h3><p className="mt-1 text-xs text-muted-foreground">25 MiB maximum</p><div className="mt-4 grid w-full grid-cols-1 gap-2.5 sm:grid-cols-3">{fileKinds.map(({ label, icon: Icon }) => <button key={label} type="button" onClick={() => inputRef.current?.click()} className="flex min-h-20 items-center justify-center gap-2 rounded-2xl border-2 border-black bg-background px-3 py-3 font-bold shadow-sm sm:flex-col"><Icon className="size-5" />{label}</button>)}</div></div>
-          )}
-        </div>
-        {state.phase !== "READY" && <button type="button" disabled={!state.file} onClick={() => active ? abortRef.current?.abort() : void protect()} className="mt-4 flex min-h-14 w-full items-center justify-center gap-2.5 rounded-2xl border-[3px] border-black bg-primary px-5 font-head text-lg shadow-md transition-transform enabled:hover:-translate-y-0.5 disabled:opacity-45">{active ? <LoaderCircle className="size-5 animate-spin" /> : <LockKeyhole className="size-5" />}{active ? "Cancel protection" : "Let's encrypt"}</button>}
-        <p className={cn("mt-3 flex min-h-6 items-center gap-2 text-sm font-medium", state.phase === "ERROR" ? "text-destructive" : "text-muted-foreground")} aria-live="polite"><CheckCircle2 className="size-4 shrink-0" />{state.message}</p>
-        {state.documentId && vault.state.status === "READY" && <SharePanel documentId={state.documentId} privateKey={vault.state.privateKey} />}
-        {vault.state.status === "READY" && !active && (
-          <button type="button" onClick={() => void vault.forget()} className="mt-4 rounded-full border-2 border-black bg-card px-4 py-2 text-xs font-bold shadow-sm">
-            Forget this device
-          </button>
-        )}
+        {!config && <button type="button" disabled={!items.length || busy} onClick={() => void protect()} className="mt-4 flex min-h-14 w-full items-center justify-center gap-2 rounded-2xl border-[3px] border-black bg-primary font-head text-lg shadow-md disabled:opacity-45"><LockKeyhole className="size-5" /> Protect {items.length || ""} {items.length === 1 ? "file" : "files"}</button>}
+        {config && <p className="mt-3 font-bold">{readyCount} / {items.filter((item) => item.phase !== "DELETED").length} protected</p>}
+        {failedCount > 0 && readyCount > 0 && <button type="button" disabled={busy} onClick={() => void continueWithoutFailed()} className="mt-3 rounded-full border-2 border-black bg-primary px-5 py-2.5 font-bold shadow-sm">Remove failed files and continue</button>}
+        <p className="mt-3 min-h-6 text-sm text-muted-foreground" aria-live="polite">{message}</p>
+        {config && groupReady && vault.state.status === "READY" && <><SharePanel groupId={config.groupId} privateKey={vault.state.privateKey} /><button type="button" onClick={() => void deleteGroup()} className="mt-4 rounded-full border-2 border-black bg-destructive px-5 py-2.5 font-bold shadow-sm"><Trash2 className="mr-2 inline size-4" /> Delete protected group</button></>}
         <KeyVaultDialog open={vaultOpen} onOpenChange={setVaultOpen} state={vault.state} onSetup={vault.setup} onUnlock={vault.unlock} />
       </div>
     </section>

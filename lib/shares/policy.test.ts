@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { canAccessShare, type ShareAccessState } from "./policy";
+import { canAccessShare, evaluateShareAccess, type ShareAccessState } from "./policy";
 
 const active: ShareAccessState = {
   status: "ACTIVE",
-  documentStatus: "READY",
+  groupStatus: "READY",
+  availableFrom: null,
   expiresAt: null,
   recipientClerkUserId: "user_alice",
   recipientEmailNormalized: "alice@example.com",
@@ -21,8 +22,15 @@ describe("share access policy", () => {
     expect(canAccessShare({ ...active, expiresAt: new Date(0) }, "user_alice", ["alice@example.com"])).toBe(false);
   });
 
-  it("rejects unfinished documents and recipient enrollment shares", () => {
-    expect(canAccessShare({ ...active, documentStatus: "PENDING" }, "user_alice", ["alice@example.com"])).toBe(false);
+  it("rejects unfinished groups and recipient enrollment shares", () => {
+    expect(canAccessShare({ ...active, groupStatus: "PROTECTING" }, "user_alice", ["alice@example.com"])).toBe(false);
     expect(canAccessShare({ ...active, status: "AWAITING_RECIPIENT_KEY" }, "user_alice", ["alice@example.com"])).toBe(false);
+  });
+
+  it("distinguishes scheduled and deleted states only after identity matches", () => {
+    const future = new Date(Date.now() + 60_000);
+    expect(evaluateShareAccess({ ...active, availableFrom: future }, "user_alice", ["alice@example.com"])).toBe("NOT_YET_AVAILABLE");
+    expect(evaluateShareAccess({ ...active, availableFrom: future }, "user_bob", ["alice@example.com"])).toBe("FORBIDDEN");
+    expect(evaluateShareAccess({ ...active, status: "DELETED" }, "user_alice", ["alice@example.com"])).toBe("DELETED");
   });
 });

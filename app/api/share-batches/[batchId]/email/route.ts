@@ -18,18 +18,21 @@ export async function POST(_request: Request, context: Context) {
     if (!batch) return json({ error: { code: "NOT_FOUND", message: "Share batch not found." } }, { status: 404 });
     if (batch.emailStatus === "ACCEPTED") return json({ status: "ACCEPTED" });
 
+    const shareRows = await getDb().select().from(shares).where(and(
+      eq(shares.batchId, batchId), eq(shares.status, "ACTIVE"),
+    ));
+    if (!shareRows.length) return json({ error: { code: "NO_ACTIVE_RECIPIENTS", message: "No enrolled recipients can be emailed." } }, { status: 409 });
     const attemptId = batch.emailAttemptId ?? batchId;
     await getDb().update(shareBatches).set({
       emailStatus: "SENDING", emailAttemptId: attemptId, updatedAt: new Date(),
     }).where(eq(shareBatches.id, batchId));
-
-    const shareRows = await getDb().select().from(shares).where(eq(shares.batchId, batchId));
     const appUrl = getAppEnv().APP_URL.replace(/\/$/, "");
     try {
       const messageIds = await sendShareEmailBatch(shareRows.map((share) => ({
         recipientEmail: share.recipientEmailNormalized,
-        shareUrl: share.status === "ACTIVE" ? `${appUrl}/share/${share.id}` : undefined,
-        expiresAt: share.expiresAt,
+        shareUrl: `${appUrl}/share/${share.id}`,
+        availableFrom: batch.availableFrom,
+        expiresAt: batch.expiresAt,
       })), attemptId, user.primaryEmail);
       await Promise.all(shareRows.map((share, index) => getDb().update(shares).set({
         providerMessageId: messageIds[index] ?? null,

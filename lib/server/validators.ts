@@ -1,10 +1,11 @@
 import { z } from "zod";
-import { MAX_RECIPIENTS } from "@/lib/crypto/constants";
+import { MAX_GROUP_FILES, MAX_RECIPIENTS } from "@/lib/crypto/constants";
 
 export const base64url = z.string().min(1).max(100_000).regex(/^[A-Za-z0-9_-]+$/);
 export const documentId = z.uuid();
 export const email = z.email().max(320);
 export const permission = z.enum(["VIEW_ONLY", "VIEW_AND_DOWNLOAD"]);
+export const createUploadGroup = z.object({ fileCount: z.number().int().min(1).max(MAX_GROUP_FILES) });
 
 export const keyBundleRegistration = z.object({
   publicKeyJwk: z.object({
@@ -50,11 +51,15 @@ export const createShares = z.object({
       clerkUserId: z.string().min(1).max(200),
       keyVersion: z.number().int().positive(),
       publicKeyFingerprint: z.string().length(64),
-      wrappedFileKey: base64url.max(1_000),
+      envelopes: z.array(z.object({
+        documentId,
+        wrappedFileKey: base64url.max(1_000),
+      })).min(1).max(MAX_GROUP_FILES),
     }),
     z.object({ status: z.literal("NOT_ENROLLED"), email }),
   ])).min(1).max(MAX_RECIPIENTS),
   permission,
+  availableFrom: z.iso.datetime().nullable().optional(),
   expiresAt: z.iso.datetime().nullable().optional(),
 });
 

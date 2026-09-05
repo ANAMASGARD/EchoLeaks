@@ -15,6 +15,7 @@ export const documentStatus = pgEnum("document_status", [
   "PENDING",
   "READY",
   "FAILED",
+  "DELETING",
   "DELETED",
 ]);
 export const permission = pgEnum("share_permission", [
@@ -26,6 +27,14 @@ export const shareStatus = pgEnum("share_status", [
   "ACTIVE",
   "REVOKED",
   "EXPIRED",
+  "DELETED",
+]);
+export const uploadGroupStatus = pgEnum("upload_group_status", [
+  "PROTECTING",
+  "PARTIAL",
+  "READY",
+  "DELETING",
+  "DELETED",
 ]);
 export const emailStatus = pgEnum("email_status", [
   "NOT_REQUESTED",
@@ -53,12 +62,31 @@ export const userKeyBundles = pgTable("user_key_bundles", {
   ...timestamps,
 });
 
+export const uploadGroups = pgTable(
+  "upload_groups",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ownerClerkUserId: text("owner_clerk_user_id").notNull(),
+    status: uploadGroupStatus("status").notNull().default("PROTECTING"),
+    expectedFileCount: integer("expected_file_count").notNull(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [
+    index("upload_groups_owner_idx").on(table.ownerClerkUserId),
+    index("upload_groups_status_idx").on(table.status),
+  ],
+);
+
 export const documents = pgTable(
   "documents",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    groupId: uuid("group_id")
+      .notNull()
+      .references(() => uploadGroups.id, { onDelete: "cascade" }),
     ownerClerkUserId: text("owner_clerk_user_id").notNull(),
-    r2ObjectKey: text("r2_object_key").notNull(),
+    r2ObjectKey: text("r2_object_key"),
     status: documentStatus("status").notNull().default("PENDING"),
     ciphertextSize: bigint("ciphertext_size", { mode: "number" }),
     encryptedMetadata: text("encrypted_metadata"),
@@ -66,10 +94,12 @@ export const documents = pgTable(
     fileIv: text("file_iv"),
     cryptoVersion: integer("crypto_version").notNull().default(1),
     completedAt: timestamp("completed_at", { withTimezone: true }),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
     ...timestamps,
   },
   (table) => [
     uniqueIndex("documents_r2_object_key_idx").on(table.r2ObjectKey),
+    index("documents_group_idx").on(table.groupId),
     index("documents_owner_idx").on(table.ownerClerkUserId),
     index("documents_status_idx").on(table.status),
   ],
@@ -98,17 +128,21 @@ export const shareBatches = pgTable(
   "share_batches",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    documentId: uuid("document_id")
+    groupId: uuid("group_id")
       .notNull()
-      .references(() => documents.id, { onDelete: "cascade" }),
+      .references(() => uploadGroups.id, { onDelete: "cascade" }),
     senderClerkUserId: text("sender_clerk_user_id").notNull(),
     permission: permission("permission").notNull(),
+    availableFrom: timestamp("available_from", { withTimezone: true }),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     emailStatus: emailStatus("email_status").notNull().default("NOT_REQUESTED"),
     emailAttemptId: uuid("email_attempt_id"),
     ...timestamps,
   },
-  (table) => [index("share_batches_document_idx").on(table.documentId)],
+  (table) => [
+    uniqueIndex("share_batches_group_idx").on(table.groupId),
+    index("share_batches_schedule_idx").on(table.availableFrom, table.expiresAt),
+  ],
 );
 
 export const shares = pgTable(
@@ -118,16 +152,15 @@ export const shares = pgTable(
     batchId: uuid("batch_id")
       .notNull()
       .references(() => shareBatches.id, { onDelete: "cascade" }),
-    documentId: uuid("document_id")
+    groupId: uuid("group_id")
       .notNull()
-      .references(() => documents.id, { onDelete: "cascade" }),
+      .references(() => uploadGroups.id, { onDelete: "cascade" }),
     senderClerkUserId: text("sender_clerk_user_id").notNull(),
     recipientClerkUserId: text("recipient_clerk_user_id"),
     recipientEmailNormalized: text("recipient_email_normalized").notNull(),
     permission: permission("permission").notNull(),
     status: shareStatus("status").notNull(),
     providerMessageId: text("provider_message_id"),
-    expiresAt: timestamp("expires_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -135,7 +168,6 @@ export const shares = pgTable(
     index("shares_recipient_user_idx").on(table.recipientClerkUserId),
     index("shares_recipient_email_idx").on(table.recipientEmailNormalized),
     index("shares_status_idx").on(table.status),
-    index("shares_expiry_idx").on(table.expiresAt),
   ],
 );
 

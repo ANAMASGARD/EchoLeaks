@@ -18,6 +18,7 @@ function escapeHtml(value: string) {
 export type ShareEmail = {
   recipientEmail: string;
   shareUrl?: string;
+  availableFrom?: Date | null;
   expiresAt: Date | null;
 };
 
@@ -25,10 +26,13 @@ function emailHtml(message: ShareEmail) {
   const address = escapeHtml(message.recipientEmail);
   const destination = message.shareUrl ?? `${getAppEnv().APP_URL}/sign-up`;
   const action = message.shareUrl ? "Open protected file" : "Create your EchoLeaks account";
+  const opening = message.availableFrom
+    ? `<p>This access opens on ${escapeHtml(message.availableFrom.toISOString())}.</p>`
+    : "";
   const expiry = message.expiresAt
     ? `<p>This access expires on ${escapeHtml(message.expiresAt.toISOString())}.</p>`
     : "";
-  return `<!doctype html><html><body style="font-family:Arial,sans-serif"><h1>EchoLeaks</h1><p>A protected file has been shared with <strong>${address}</strong>.</p><p>Sign in with that exact address to continue securely.</p>${expiry}<p><a href="${escapeHtml(destination)}">${action}</a></p><p>Do not forward this link. Possessing it alone does not grant access.</p></body></html>`;
+  return `<!doctype html><html><body style="font-family:Arial,sans-serif"><h1>EchoLeaks</h1><p>A protected file group has been shared with <strong>${address}</strong>.</p><p>Sign in with that exact address to continue securely.</p>${opening}${expiry}<p><a href="${escapeHtml(destination)}">${action}</a></p><p>Do not forward this link. Possessing it alone does not grant access.</p></body></html>`;
 }
 
 export async function sendShareEmailBatch(

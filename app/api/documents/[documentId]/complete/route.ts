@@ -6,6 +6,7 @@ import { documentKeyEnvelopes, documents } from "@/lib/db/schema";
 import { assertEncryptedObject } from "@/lib/r2/objects";
 import { json, requireUuid, safeRouteError } from "@/lib/server/http";
 import { completeDocument } from "@/lib/server/validators";
+import { refreshUploadGroupStatus } from "@/lib/server/upload-groups";
 
 type Context = { params: Promise<{ documentId: string }> };
 
@@ -25,6 +26,7 @@ export async function POST(request: Request, context: Context) {
       return json({ error: { code: "INVALID_STATE", message: "This document cannot be finalized." } }, { status: 409 });
     }
 
+    if (!document.r2ObjectKey) return json({ error: { code: "INVALID_STATE", message: "Encrypted storage has been removed." } }, { status: 409 });
     await assertEncryptedObject(document.r2ObjectKey, input.ciphertextSize);
     const [, updated] = await getDb().batch([
       getDb().insert(documentKeyEnvelopes).values({
@@ -45,6 +47,7 @@ export async function POST(request: Request, context: Context) {
       }).where(and(eq(documents.id, documentId), eq(documents.status, "PENDING"))).returning({ id: documents.id }),
     ]);
     if (!updated.length) return json({ error: { code: "INVALID_STATE", message: "Document finalization raced another request." } }, { status: 409 });
+    await refreshUploadGroupStatus(document.groupId);
     return json({ ready: true, documentId });
   } catch (error) {
     if (error instanceof ZodError) return json({ error: { code: "INVALID_REQUEST", message: "Finalization data is invalid." } }, { status: 400 });

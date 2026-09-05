@@ -17,6 +17,7 @@ const expectedTables = [
   "documents",
   "share_batches",
   "shares",
+  "upload_groups",
   "user_key_bundles",
 ];
 
@@ -39,7 +40,7 @@ try {
     process.exit(1);
   }
 
-  console.log("Neon and Drizzle are connected. All six EchoLeaks tables are present.");
+  console.log("Neon and Drizzle are connected. All seven EchoLeaks tables are present.");
 } catch {
   console.error("Neon connection failed. Check DATABASE_URL, network access, and the Neon project status.");
   process.exit(1);

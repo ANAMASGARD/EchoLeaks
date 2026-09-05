@@ -30,16 +30,27 @@ export type KeySetupResult = {
   bundle: KeyBundleResponse;
 };
 
+export type EncryptedDocumentDescriptor = {
+  documentId: string;
+  status: "READY" | "DELETED";
+  wrappedFileKey: string | null;
+  encryptedMetadata: string | null;
+  metadataIv: string | null;
+};
+
 export type ShareAccessResponse = {
+  groupId: string;
+  documents: EncryptedDocumentDescriptor[];
+  permission: "VIEW_ONLY" | "VIEW_AND_DOWNLOAD";
+  availableFrom: string | null;
+  expiresAt: string | null;
+};
+
+export type DocumentDownloadAccess = {
   documentId: string;
   downloadUrl: string;
   wrappedFileKey: string;
-  encryptedMetadata: string;
-  metadataIv: string;
   fileIv: string;
-  cryptoVersion: number;
-  permission: "VIEW_ONLY" | "VIEW_AND_DOWNLOAD";
-  expiresAt: string | null;
 };
 
 export type PreparedRecipient = {

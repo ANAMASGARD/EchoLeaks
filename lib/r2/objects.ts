@@ -1,6 +1,6 @@
 import "server-only";
 
-import { GetObjectCommand, HeadObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { getR2Env } from "@/lib/server/env";
 import { getR2Client } from "./client";
@@ -43,4 +43,9 @@ export async function assertEncryptedObject(objectKey: string, expectedSize: num
   if (object.ContentLength !== expectedSize) {
     throw new Error("Encrypted object size does not match finalization request");
   }
+}
+
+export async function deleteEncryptedObject(objectKey: string) {
+  const env = getR2Env();
+  await getR2Client().send(new DeleteObjectCommand({ Bucket: env.R2_BUCKET_NAME, Key: objectKey }));
 }

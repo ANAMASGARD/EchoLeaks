@@ -1,6 +1,6 @@
 # EchoLeaks
 
-EchoLeaks is a Next.js application for client-side encrypted file sharing. Files are encrypted in a browser Worker before upload, private Cloudflare R2 stores ciphertext only, and every recipient gets a separately wrapped document key. Clerk authenticates both the bound user ID and verified email before the server releases a short-lived ciphertext URL.
+EchoLeaks is a Next.js application for client-side encrypted file sharing. Files are staged into groups and independently encrypted in a browser Worker before upload, private Cloudflare R2 stores ciphertext only, and every recipient gets a separately wrapped key for every file. Clerk authenticates both the bound user ID and verified email before the server releases an encrypted manifest or a short-lived ciphertext URL.
 
 This is a prototype implementation of client-side E2EE/server-blind storage. It has not received an independent cryptographic audit.
 
@@ -108,8 +108,9 @@ For the prototype, sender-email verification can work without owning a domain. A
 
 ## Prototype limits
 
-- 25 MiB maximum file size; encryption currently holds a complete file in memory.
+- 10 files and 100 MiB per group, with a 25 MiB per-file limit. Files are encrypted sequentially and each operation currently holds one complete file in memory.
 - 100 recipients per batch.
+- Each group has one permission and an optional opening/expiry schedule shared by all recipients.
 - CSV, TXT, and XLSX recipient lists are parsed locally and never uploaded. Legacy XLS is intentionally not accepted.
 - Images, PDFs, text, JSON, and common source files can be previewed locally.
 - Other file types can be locally downloaded only with `VIEW_AND_DOWNLOAD`.
@@ -118,6 +119,8 @@ For the prototype, sender-email verification can work without owning a domain. A
 - Losing both the recovery passphrase and every trusted device makes old files unrecoverable.
 
 Large-file streaming, authenticated sending domains, delivery webhooks, durable workflow queues, and additional viewers are future work.
+
+The uploader can remove an individual encrypted file or a complete group from History. EchoLeaks deletes R2 ciphertext and cryptographic access material while retaining minimal status and audit timestamps. Retryable synchronous deletion is used for the prototype; a durable cleanup workflow is recommended for production.
 
 ## Verification
 
